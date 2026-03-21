@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-    <title>Noiceverse</title>
+    <title>Noiceverse |</title>
 
     <style>
         :root {
@@ -214,50 +214,35 @@
 
 <script>
 // JavaScript with ENHANCED Continue Watching (resumes last season/episode + episode label + progress bar)
-const API = "https://api.themoviedb.org/3";
-const KEY = "2bc67e60f9e19acc419050f32c477b39";
+const API = "https://api.themoviedb.org/3", KEY = "2bc67e60f9e19acc419050f32c477b39";
 const SERVERS = ["https://vidsrc.cc/v2/embed/", "https://vidsrc.me/embed/"];
-let currentMedia, currentIMDB, currentIsTV, heroMedia, heroTimer, heroList = [], ytPlayer, isDubbed = false, currentServerIndex = 0, currentSeason = 1, currentEpisode = 1;
+let currentMedia, currentIMDB, currentIsTV, heroMedia, heroTimer, heroList=[], ytPlayer, isDubbed=false, currentServerIndex=0, currentSeason=1, currentEpisode=1;
 
-const tag = document.createElement('script');
-tag.src = "https://www.youtube.com/iframe_api";
-document.head.appendChild(tag);
-
+const tag = document.createElement('script'); tag.src = "https://www.youtube.com/iframe_api"; document.head.appendChild(tag);
 window.onYouTubeIframeAPIReady = () => {
-    ytPlayer = new YT.Player('heroYoutubePlayer', {
-        playerVars: { 'autoplay': 1, 'controls': 0, 'mute': 1, 'loop': 1, 'playlist': '' },
-        events: { 'onReady': (e) => e.target.playVideo() }
-    });
+    ytPlayer = new YT.Player('heroYoutubePlayer', { playerVars: { 'autoplay': 1, 'controls': 0, 'mute': 1, 'loop': 1, 'playlist': '' }, events: { 'onReady': (e) => e.target.playVideo() } });
 };
 
-window.onscroll = () => {
-    document.getElementById('navbar').classList.toggle('scrolled', window.scrollY > 30);
-};
+window.onscroll = () => document.getElementById('navbar').classList.toggle('scrolled', window.scrollY > 30);
 
 async function init() {
-    loadGenres();
-    await loadTrending();
-    loadContinueWatching();
-    updateWatchlistRow();
+    loadGenres(); await loadTrending(); loadContinueWatching(); updateWatchlistRow();
 }
 
 async function loadGenres() {
-    let res = await fetch(`${API}/genre/movie/list?api_key=${KEY}`).then(r => r.json());
+    let res = await fetch(`${API}/genre/movie/list?api_key=${KEY}`).then(r=>r.json());
     let container = document.getElementById("genreContainer");
     container.innerHTML = `<div class="chip active" onclick="goHome()">All</div>`;
     res.genres.slice(0, 10).forEach(g => {
-        container.innerHTML += `<div class="chip" onclick="filterByGenre(${g.id}, '${g.name.replace(/'/g, "\\'")}')">${g.name}</div>`;
+        container.innerHTML += `<div class="chip" onclick="filterByGenre(${g.id}, '${g.name}')">${g.name}</div>`;
     });
 }
 
 async function loadTrending() {
-    let res = await fetch(`${API}/trending/all/week?api_key=${KEY}`).then(r => r.json());
+    let res = await fetch(`${API}/trending/all/week?api_key=${KEY}`).then(r=>r.json());
     heroList = res.results.filter(m => m.backdrop_path);
     renderGrid(res.results, "movieRow");
-    if (heroList.length > 0) {
-        updateHero(heroList[0]);
-        startHeroCycle();
-    }
+    if(heroList.length > 0) { updateHero(heroList[0]); startHeroCycle(); }
 }
 
 function startHeroCycle() {
@@ -272,51 +257,47 @@ async function updateHero(m) {
     heroMedia = m;
     document.getElementById("hero").style.backgroundImage = `ur[](https://image.tmdb.org/t/p/original${m.backdrop_path})`;
     document.getElementById("heroTitle").textContent = m.title || m.name;
-    document.getElementById("heroDesc").textContent = m.overview?.slice(0, 120) + "..." || "";
-
+    document.getElementById("heroDesc").textContent = m.overview.slice(0, 120) + "...";
+    
     let type = m.media_type || (m.first_air_date ? 'tv' : 'movie');
-    let det = await fetch(`${API}/${type}/${m.id}?api_key=${KEY}`).then(r => r.json());
-    document.getElementById("heroMeta").innerHTML = `⭐ ${m.vote_average?.toFixed(1) || '?'} | ${det.release_date || det.first_air_date || 'N/A'}`;
+    let det = await fetch(`${API}/${type}/${m.id}?api_key=${KEY}`).then(r=>r.json());
+    document.getElementById("heroMeta").innerHTML = `⭐ ${m.vote_average.toFixed(1)} | ${det.release_date || det.first_air_date}`;
 
     if (window.innerWidth > 768) {
-        let vres = await fetch(`${API}/${type}/${m.id}/videos?api_key=${KEY}`).then(r => r.json());
-        let tr = vres.results?.find(v => v.type === "Trailer");
-        if (tr && ytPlayer?.loadVideoById) {
+        let vres = await fetch(`${API}/${type}/${m.id}/videos?api_key=${KEY}`).then(r=>r.json());
+        let tr = vres.results.find(v => v.type === "Trailer");
+        if(tr && ytPlayer?.loadVideoById) {
             document.getElementById("hero").classList.add("video-active");
             ytPlayer.loadVideoById({ videoId: tr.key, startSeconds: 10 });
-        } else {
-            document.getElementById("hero").classList.remove("video-active");
-        }
+        } else document.getElementById("hero").classList.remove("video-active");
     }
 }
 
 function renderGrid(data, id) {
-    let row = document.getElementById(id);
-    row.innerHTML = "";
+    let row = document.getElementById(id); row.innerHTML = "";
     data.forEach(m => {
         let poster = m.poster_path || m.poster;
-        if (!poster) return;
-        let div = document.createElement("div");
-        div.className = "card";
+        if(!poster) return;
+        let div = document.createElement("div"); div.className = "card";
         div.innerHTML = `<img src="https://image.tmdb.org/t/p/w500${poster}">`;
-        div.onclick = () => openPlayer(m, !!m.first_air_date || m.media_type === 'tv');
+        div.onclick = () => openPlayer(m, m.media_type === "tv" || !!m.first_air_date || m.isTV);
         row.appendChild(div);
     });
 }
 
+// NEW: Enhanced Continue Watching renderer with episode label + progress bar
 function renderContinue(data, id) {
-    let row = document.getElementById(id);
-    row.innerHTML = "";
+    let row = document.getElementById(id); row.innerHTML = "";
     data.forEach(item => {
         let poster = item.poster_path || item.poster;
-        if (!poster) return;
-        let div = document.createElement("div");
-        div.className = "card";
+        if(!poster) return;
+        let div = document.createElement("div"); div.className = "card";
         
-        let labelHTML = item.isTV && item.lastSeason !== undefined
-            ? `<div class="episode-label">S${item.lastSeason} E${item.lastEpisode}</div>`
-            : "";
-
+        let labelHTML = "";
+        if(item.isTV && item.lastSeason !== undefined) {
+            labelHTML = `<div class="episode-label">S${item.lastSeason} E${item.lastEpisode}</div>`;
+        }
+        
         div.innerHTML = `
             <img src="https://image.tmdb.org/t/p/w500${poster}" style="width:100%; display:block;">
             ${labelHTML}
@@ -328,44 +309,170 @@ function renderContinue(data, id) {
 }
 
 async function openPlayer(m, isTV) {
-    currentMedia = m;
+    currentMedia = m; 
     currentIsTV = isTV;
-    clearInterval(heroTimer);
-    if (ytPlayer?.pauseVideo) ytPlayer.pauseVideo();
-
+    clearInterval(heroTimer); 
+    if(ytPlayer?.pauseVideo) ytPlayer.pauseVideo();
+    
     document.getElementById("playerSection").style.display = "block";
     document.getElementById("title").textContent = m.title || m.name;
 
-    let res = await fetch(`${API}/${isTV ? 'tv' : 'movie'}/${m.id}?api_key=${KEY}&append_to_response=external_ids,credits,recommendations`).then(r => r.json());
+    let res = await fetch(`${API}/${isTV?'tv':'movie'}/${m.id}?api_key=${KEY}&append_to_response=external_ids,credits,recommendations`).then(r=>r.json());
     currentIMDB = res.imdb_id || res.external_ids?.imdb_id;
-    renderCast(res.credits?.cast || []);
-    renderGrid(res.recommendations?.results || [], "recommendRow");
+    renderCast(res.credits.cast); 
+    renderGrid(res.recommendations.results, "recommendRow");
 
-    if (isTV) {
+    if(isTV) {
         document.getElementById("tvSelectors").classList.remove("hidden");
-        currentSeason = m.lastSeason ?? 1;
-        currentEpisode = m.lastEpisode ?? 1;
-        renderSeasonBtns(res.seasons || []);
+        
+        // IMPROVED: Resume from last watched episode if available
+        if (m.lastSeason !== undefined) {
+            currentSeason = m.lastSeason;
+            currentEpisode = m.lastEpisode || 1;
+        } else {
+            currentSeason = 1;
+            currentEpisode = 1;
+        }
+        
+        renderSeasonBtns(res.seasons);
     } else {
-        document.getElementById("tvSelectors").classList.add("hidden");
+        document.getElementById("tvSelectors").classList.add("hidden"); 
         loadStream();
     }
 }
 
-// ... (rest of your functions remain the same – I didn't repeat them to save space)
-
-function loadCategory(category) {
-    // Placeholder – implement if you want category filtering
-    console.log("Category selected:", category);
-    // You can expand this later to load movies/tv by category
+function renderSeasonBtns(seasons) {
+    let row = document.getElementById("seasonBtns"); row.innerHTML = "";
+    seasons.forEach(s => {
+        if(s.season_number === 0) return;
+        let b = document.createElement("button"); 
+        b.className = `select-btn ${s.season_number === currentSeason ? 'active' : ''}`;
+        b.textContent = `S${s.season_number}`;
+        b.onclick = () => {
+            const newSeason = s.season_number;
+            // Reset episode to 1 only when changing season (standard UX)
+            if (newSeason !== currentSeason) currentEpisode = 1;
+            currentSeason = newSeason;
+            document.querySelectorAll("#seasonBtns .select-btn").forEach(x=>x.classList.remove('active'));
+            b.classList.add('active');
+            loadEpisodes(currentMedia.id, newSeason);
+        };
+        row.appendChild(b);
+    });
+    loadEpisodes(currentMedia.id, currentSeason);
 }
 
-// Add missing function stubs if needed
+async function loadEpisodes(id, sNum) {
+    let res = await fetch(`${API}/tv/${id}/season/${sNum}?api_key=${KEY}`).then(r=>r.json());
+    let row = document.getElementById("episodeBtns"); row.innerHTML = "";
+    res.episodes.forEach(e => {
+        let b = document.createElement("button"); 
+        b.className = `select-btn ${e.episode_number === currentEpisode ? 'active' : ''}`;
+        b.textContent = `Ep ${e.episode_number}`;
+        b.onclick = () => {
+            currentEpisode = e.episode_number;
+            document.querySelectorAll("#episodeBtns .select-btn").forEach(x=>x.classList.remove('active'));
+            b.classList.add('active'); 
+            loadStream();
+        };
+        row.appendChild(b);
+    });
+    loadStream();
+}
+
+function loadStream() {
+    let url = currentIsTV ? `${SERVERS[currentServerIndex]}tv/${currentIMDB}/${currentSeason}/${currentEpisode}` : `${SERVERS[currentServerIndex]}movie/${currentIMDB}`;
+    if(isDubbed) url += (url.includes('?') ? '&ds=1' : '?ds=1');
+    document.getElementById("playerFrame").src = url;
+    document.getElementById("serverNum").textContent = currentServerIndex + 1;
+    saveContinue(); // save every time we load a stream
+}
+
+function setLanguageMode(mode) {
+    isDubbed = (mode === 'dub');
+    document.getElementById("subBtn").classList.toggle("active", !isDubbed);
+    document.getElementById("dubBtn").classList.toggle("active", isDubbed);
+    loadStream();
+}
+
+function renderCast(cast) {
+    let row = document.getElementById("castRow"); row.innerHTML = "";
+    cast.slice(0, 8).forEach(p => {
+        let img = p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : 'https://via.placeholder.com/60';
+        row.innerHTML += `<div class="cast-card"><img src="${img}"><div style="font-size:0.6rem; margin-top:3px; color:#888;">${p.name}</div></div>`;
+    });
+}
+
+function switchServer() { 
+    currentServerIndex = (currentServerIndex + 1) % SERVERS.length; 
+    loadStream(); 
+}
+
+function closePlayer() { 
+    document.getElementById("playerSection").style.display = "none"; 
+    document.getElementById("playerFrame").src = ""; 
+    startHeroCycle(); 
+}
+
+function goHome() { location.reload(); }
+
+// IMPROVED Continue Watching save (stores last season/episode + fixes poster_path)
+function saveContinue() {
+    let data = JSON.parse(localStorage.getItem("cw") || "[]");
+    data = data.filter(x => x.id !== currentMedia.id);
+    
+    let entry = {
+        id: currentMedia.id,
+        title: currentMedia.title || currentMedia.name,
+        poster_path: currentMedia.poster_path || currentMedia.poster,
+        isTV: currentIsTV
+    };
+    if (currentIsTV) {
+        entry.lastSeason = currentSeason;
+        entry.lastEpisode = currentEpisode;
+    }
+    
+    data.unshift(entry);
+    localStorage.setItem("cw", JSON.stringify(data.slice(0, 10)));
+    loadContinueWatching();
+}
+
 function loadContinueWatching() {
     let data = JSON.parse(localStorage.getItem("cw") || "[]");
     document.getElementById("continueSection").classList.toggle("hidden", data.length === 0);
-    if (data.length > 0) renderContinue(data, "continueRow");
+    if (data.length > 0) {
+        renderContinue(data, "continueRow");
+    }
 }
+
+function toggleWatchlist(m) {
+    let list = JSON.parse(localStorage.getItem("watchlist") || "[]");
+    list.find(x => x.id === m.id) ? list = list.filter(x => x.id !== m.id) : list.push(m);
+    localStorage.setItem("watchlist", JSON.stringify(list));
+    updateWatchlistRow();
+}
+
+function updateWatchlistRow() {
+    let list = JSON.parse(localStorage.getItem("watchlist") || "[]");
+    document.getElementById("watchlistSection").classList.toggle("hidden", list.length === 0);
+    if (list.length > 0) renderGrid(list, "watchlistRow");
+}
+
+async function performSearch() {
+    let q = document.getElementById("searchInput").value; if(!q) return;
+    document.getElementById("hero").classList.add("hidden");
+    let res = await fetch(`${API}/search/multi?api_key=${KEY}&query=${q}`).then(r=>r.json());
+    renderGrid(res.results, "movieRow");
+}
+
+async function filterByGenre(id, name) {
+    document.getElementById("rowTitle").textContent = name;
+    document.getElementById("hero").classList.add("hidden");
+    let res = await fetch(`${API}/discover/movie?api_key=${KEY}&with_genres=${id}`).then(r=>r.json());
+    renderGrid(res.results, "movieRow");
+}
+
+function playHero() { openPlayer(heroMedia, !!heroMedia.first_air_date); }
 
 init();
 </script>
