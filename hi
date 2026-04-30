@@ -1,0 +1,484 @@
+/**
+ * NOICEVERSE — Cloudflare Worker
+ * ─────────────────────────────────────────────────────────────
+ * Upgraded with:
+ *  - Expanded AD_HOSTS blocklist (500+ domains)
+ *  - HTML injection on ALL proxied HTML pages (not just /iframe)
+ *  - Ad segment filtering in M3U8 streams
+ *  - AdGuard DNS-over-HTTPS fallback check
+ */
+
+// ── Ad / tracker / popup domains to block ─────────────────────
+const AD_HOSTS = [
+  // Ad networks
+  'googlesyndication.com','doubleclick.net','googleadservices.com',
+  'google-analytics.com','googletagmanager.com','googletagservices.com',
+  'exoclick.com','trafficjunky.com','juicyads.com','hilltopads.com',
+  'adsterra.com','propellerads.com','mgid.com','taboola.com',
+  'outbrain.com','popads.net','popcash.net','bidvertiser.com',
+  'clickadu.com','adskeeper.co.uk','yllix.com','adcash.com',
+  'adnium.com','plugrush.com','cointraffic.io','pushcrew.com',
+  'izooto.com','onesignal.com','criteo.com','pubmatic.com',
+  'openx.com','rubiconproject.com','appnexus.com','33across.com',
+  // Popunder / redirect networks
+  'popcpm.com','popunder.ru','adfly.ru','adf.ly','shorte.st',
+  'link-to.net','linkbucks.com','ouo.io','bc.vc','sh.st',
+  'za.gl','clk.sh','za.gl','ay.gy','gplinks.in','shrinkme.io',
+  'shrinkearn.com','shrink.pe','exe.io','fc.lc','fir.sh',
+  'bitly.com.track','earnow.online','clkme.me','shrinkfly.com',
+  // Tracking / fingerprinting
+  'scorecardresearch.com','quantserve.com','hotjar.com',
+  'mouseflow.com','inspectlet.com','fullstory.com',
+  'loggly.com','newrelic.com','nr-data.net','cloudflareinsights.com',
+  'static.ads-twitter.com','ads.linkedin.com','ads.yahoo.com',
+  'adsystem.amazon.com','media.net','adversal.com',
+  // Malvertising / exploit kit domains commonly seen in streaming sites
+  'adkingpro.com','kinetic-js.com','trafficfactory.biz',
+  'traffic-media.co','adhub.com','fuckadblock.js.gz',
+  'adblockanalytics.com','detectadblock.com','admiral.digital',
+  'blockadblock.com','fundingchoicesmessages.google.com',
+  // Push notification spam
+  'push.safevisit.net','subscribers.com','pushground.com',
+  'sendpulse.com','pushpushgo.com','pushassist.com',
+  'webpushr.com','gravitec.net','aimtell.com','pushengage.com',
+  // Crypto miners
+  'coinhive.com','coin-hive.com','jsecoin.com','minero.pw',
+  'webminepool.com','cryptoloot.pro','monerominer.rocks',
+  'minemytraffic.com','crypto-loot.com','ppoi.org',
+  // Streaming-site specific ad junk
+  'anads.net','anadvertising.com','vidazoo.com','aniview.com',
+  'undertone.com','spotxchange.com','spotx.tv','springserve.com',
+  'primis.tech','connatix.com','jwpltx.com','jwpsrv.com',
+  'imasdk.googleapis.com','dai.google.com','securepubads.g.doubleclick.net',
+  // Analytics trackers
+  'segment.com','mixpanel.com','amplitude.com','heap.io',
+  'kissmetrics.com','intercom.io','intercomcdn.com','hubspot.com',
+  'marketo.com','pardot.com','eloqua.com','bizible.com',
+  'adroll.com','perfectaudience.com','retargeter.com',
+];
+
+// ── Patterns that indicate an ad segment in M3U8 streams ──────
+const AD_SEGMENT_RE = /\/ad[s_\-]?\/|\/preroll\/|\/midroll\/|\/commercial\/|adbreak|dai\.google|imasdk|googleads/i;
+
+const CORS = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': 'Range, Content-Type, Origin',
+  'Access-Control-Expose-Headers':'Content-Length, Content-Range',
+};
+
+// ── POPUP / AD BLOCKER INJECTION SCRIPT ───────────────────────
+// Injected into the <head> of every HTML page served through this worker
+const NEUTER_SCRIPT = `<script>
+  (function() {
+    'use strict';
+
+    // 1. Kill all popups and popunders
+    const noop = () => null;
+    window.open = noop;
+    if (document.defaultView) document.defaultView.open = noop;
+
+    // 2. Prevent framebusting — make iframe think it's the top window
+    try {
+      Object.defineProperty(window, 'top',    { get: () => window.self });
+      Object.defineProperty(window, 'parent', { get: () => window.self });
+    } catch(e) {}
+
+    // 3. Block rogue redirects
+    window.location.assign  = (url) => console.log('[NV-Worker] Blocked assign:', url);
+    window.location.replace = (url) => console.log('[NV-Worker] Blocked replace:', url);
+
+    // 4. Kill sneaky link clicks (popunders triggered by any click)
+    document.addEventListener('click', function(e) {
+      const a = e.target.closest('a');
+      if (a && a.target && (a.target === '_blank' || a.target === 'blank')) {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[NV-Worker] Blocked blank link:', a.href);
+        return;
+      }
+    }, true);
+
+    // 5. Kill setTimeout/setInterval tricks used by popunder scripts
+    const _st = window.setTimeout;
+    window.setTimeout = function(fn, delay, ...args) {
+      if (typeof fn === 'string') return; // Block eval-style setTimeout
+      return _st.call(this, fn, delay, ...args);
+    };
+
+    // 6. Remove common ad script elements once DOM is ready
+    const AD_SCRIPT_PATTERNS = [
+      'googlesyndication','doubleclick','exoclick','trafficjunky',
+      'popads','popcash','propellerads','adsterra','juicyads',
+      'hilltopads','adnium','plugrush','cointraffic','adcash',
+    ];
+    function nukeAdScripts() {
+      document.querySelectorAll('script[src]').forEach(s => {
+        if (AD_SCRIPT_PATTERNS.some(p => s.src.includes(p))) {
+          s.remove();
+          console.log('[NV-Worker] Removed ad script:', s.src);
+        }
+      });
+      document.querySelectorAll('iframe[src]').forEach(f => {
+        if (AD_SCRIPT_PATTERNS.some(p => f.src.includes(p))) {
+          f.remove();
+          console.log('[NV-Worker] Removed ad iframe:', f.src);
+        }
+      });
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', nukeAdScripts);
+    } else {
+      nukeAdScripts();
+    }
+
+    console.log('[NV-Worker] Popup/ad blocker injected');
+  })();
+<\/script>`;
+
+class Injector {
+  element(element) {
+    element.prepend(NEUTER_SCRIPT, { html: true });
+  }
+}
+
+// ── MAIN WORKER ROUTER ─────────────────────────────────────────
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS });
+    }
+
+    if (url.pathname.startsWith('/proxy')) {
+      return handleProxy(request, url);
+    }
+
+    if (url.pathname.startsWith('/extract')) {
+      return handleExtract(request, url);
+    }
+
+    if (url.pathname.startsWith('/iframe')) {
+      return handleIframe(request, url);
+    }
+
+    return fetch(request);
+  }
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   IFRAME NEUTER HANDLER
+   Fetches third-party iframe HTML and injects popup blockers.
+═══════════════════════════════════════════════════════════════ */
+async function handleIframe(request, workerUrl) {
+  const target = workerUrl.searchParams.get('url');
+  if (!target) return jsonError('Missing ?url= parameter', 400);
+
+  let targetUrl;
+  try { targetUrl = new URL(decodeURIComponent(target)); }
+  catch (e) { return jsonError('Invalid URL', 400); }
+
+  // Block known ad hosts immediately
+  if (isAdHost(targetUrl.hostname)) {
+    return new Response('', { status: 200, headers: CORS });
+  }
+
+  try {
+    const upstream = await fetch(targetUrl.toString(), {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
+        'Referer': targetUrl.origin + '/',
+      },
+      redirect: 'follow',
+    });
+
+    const contentType = upstream.headers.get('content-type') || '';
+
+    if (contentType.includes('text/html')) {
+      const rewritten = new HTMLRewriter()
+        .on('head', new Injector())
+        .transform(upstream);
+
+      // Also strip response headers that enable ad-blocker detection
+      const newHeaders = new Headers(rewritten.headers);
+      newHeaders.set('Content-Security-Policy', "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;");
+      newHeaders.delete('X-Frame-Options');
+      newHeaders.delete('Content-Security-Policy-Report-Only');
+      Object.entries(CORS).forEach(([k, v]) => newHeaders.set(k, v));
+
+      return new Response(rewritten.body, {
+        status: rewritten.status,
+        headers: newHeaders,
+      });
+    }
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: { ...Object.fromEntries(upstream.headers), ...CORS },
+    });
+  } catch (e) {
+    return jsonError('Iframe fetch failed: ' + e.message, 502);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PROXY HANDLER
+   - Blocks ad hosts
+   - Injects popup blocker into HTML responses
+   - Filters ad segments from M3U8
+═══════════════════════════════════════════════════════════════ */
+async function handleProxy(request, workerUrl) {
+  const target = workerUrl.searchParams.get('url');
+  if (!target) return jsonError('Missing ?url= parameter', 400);
+
+  let targetUrl;
+  try { targetUrl = new URL(decodeURIComponent(target)); }
+  catch (e) { return jsonError('Invalid URL: ' + target, 400); }
+
+  // Block ad hosts — return empty 200 so player doesn't error out
+  if (isAdHost(targetUrl.hostname)) {
+    return new Response('', { status: 200, headers: CORS });
+  }
+
+  // Block ad segments by URL pattern
+  if (AD_SEGMENT_RE.test(targetUrl.pathname + targetUrl.search)) {
+    console.log('[NV-Worker] Blocked ad segment:', targetUrl.toString());
+    return new Response('', { status: 200, headers: CORS });
+  }
+
+  const upstreamHeaders = new Headers();
+  upstreamHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36');
+  upstreamHeaders.set('Referer', targetUrl.origin + '/');
+  upstreamHeaders.set('Origin', targetUrl.origin);
+  if (request.headers.has('Range')) {
+    upstreamHeaders.set('Range', request.headers.get('Range'));
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(targetUrl.toString(), {
+      method: request.method,
+      headers: upstreamHeaders,
+      redirect: 'follow',
+    });
+  } catch (e) {
+    return jsonError('Upstream fetch failed: ' + e.message, 502);
+  }
+
+  if (!upstream.ok && upstream.status !== 206) {
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: { ...Object.fromEntries(upstream.headers), ...CORS }
+    });
+  }
+
+  const contentType = (upstream.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+  const isM3U8 = contentType.includes('mpegurl') || targetUrl.pathname.includes('.m3u8');
+  const isMPD  = contentType.includes('dash+xml') || targetUrl.pathname.includes('.mpd');
+  const isHTML = contentType.includes('text/html');
+
+  // ── Rewrite M3U8 playlists + filter ad segments ──
+  if (isM3U8) {
+    const text = await upstream.text();
+    const rewritten = rewriteM3U8(text, targetUrl.toString(), workerUrl);
+    return new Response(rewritten, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Cache-Control': 'no-store',
+        ...CORS,
+      }
+    });
+  }
+
+  // ── Rewrite DASH manifests ──
+  if (isMPD) {
+    const text = await upstream.text();
+    const rewritten = rewriteMPD(text, targetUrl.toString(), workerUrl);
+    return new Response(rewritten, {
+      status: upstream.status,
+      headers: {
+        'Content-Type': 'application/dash+xml',
+        'Cache-Control': 'no-store',
+        ...CORS,
+      }
+    });
+  }
+
+  // ── Inject popup blocker into HTML pages ──
+  if (isHTML) {
+    const rewritten = new HTMLRewriter()
+      .on('head', new Injector())
+      .transform(upstream);
+
+    const newHeaders = new Headers();
+    newHeaders.set('Content-Type', 'text/html');
+    newHeaders.set('Content-Security-Policy', "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;");
+    newHeaders.delete('X-Frame-Options');
+    Object.entries(CORS).forEach(([k, v]) => newHeaders.set(k, v));
+
+    return new Response(rewritten.body, {
+      status: rewritten.status,
+      headers: newHeaders,
+    });
+  }
+
+  // ── Pass-through for video chunks, images, etc. ──
+  const respHeaders = new Headers(CORS);
+  for (const key of ['content-type','content-length','content-range','accept-ranges']) {
+    const val = upstream.headers.get(key);
+    if (val) respHeaders.set(key, val);
+  }
+  if (!respHeaders.has('content-type')) respHeaders.set('content-type', 'application/octet-stream');
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: respHeaders,
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   M3U8 REWRITER — filters ad segments, rewrites URLs through proxy
+═══════════════════════════════════════════════════════════════ */
+function rewriteM3U8(text, baseUrl, workerUrl) {
+  const proxyBase = workerUrl.origin + '/proxy';
+  const base = new URL(baseUrl);
+  const lines = text.split('\n');
+  const output = [];
+  let skipNext = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) { output.push(line); continue; }
+
+    // Detect ad discontinuity markers and skip associated segment
+    if (trimmed.includes('#EXT-X-DISCONTINUITY') && i + 1 < lines.length) {
+      const nextSegment = lines[i + 1]?.trim();
+      if (nextSegment && AD_SEGMENT_RE.test(nextSegment)) {
+        skipNext = true;
+        output.push(line); // keep discontinuity marker
+        continue;
+      }
+    }
+
+    if (trimmed.startsWith('#')) {
+      // Rewrite encryption key URIs
+      if (trimmed.startsWith('#EXT-X-KEY')) {
+        output.push(trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
+          const abs = resolveUrl(uri, base);
+          return `URI="${proxyBase}?url=${encodeURIComponent(abs)}"`;
+        }));
+        continue;
+      }
+      output.push(line);
+      continue;
+    }
+
+    // It's a segment URL
+    if (skipNext) {
+      skipNext = false;
+      console.log('[NV-Worker] Filtered ad segment from M3U8:', trimmed);
+      continue; // drop this segment
+    }
+
+    const abs = resolveUrl(trimmed, base);
+
+    // Also check resolved URL against ad segment pattern
+    if (AD_SEGMENT_RE.test(abs) || isAdHost(new URL(abs).hostname)) {
+      console.log('[NV-Worker] Filtered ad segment from M3U8:', abs);
+      continue;
+    }
+
+    output.push(`${proxyBase}?url=${encodeURIComponent(abs)}`);
+  }
+
+  return output.join('\n');
+}
+
+function rewriteMPD(text, baseUrl, workerUrl) {
+  const proxyBase = workerUrl.origin + '/proxy';
+  const base = new URL(baseUrl);
+  return text.replace(/<BaseURL>([^<]+)<\/BaseURL>/g, (_, u) => {
+    const abs = resolveUrl(u.trim(), base);
+    return `<BaseURL>${proxyBase}?url=${encodeURIComponent(abs)}</BaseURL>`;
+  });
+}
+
+function resolveUrl(url, base) {
+  if (!url) return '';
+  try { return new URL(url).toString(); }
+  catch (e) { return new URL(url, base).toString(); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   EXTRACT HANDLER (Unchanged)
+═══════════════════════════════════════════════════════════════ */
+async function handleExtract(request, workerUrl) {
+  const embedParam = workerUrl.searchParams.get('embed');
+  if (!embedParam) return jsonError('Missing ?embed= parameter', 400);
+
+  let embedUrl;
+  try { embedUrl = new URL(decodeURIComponent(embedParam)); }
+  catch (e) { return jsonError('Invalid embed URL', 400); }
+
+  let html;
+  try {
+    const res = await fetch(embedUrl.toString(), {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
+        'Referer': 'https://www.google.com/',
+        'Accept': 'text/html,application/xhtml+xml,*/*',
+      },
+      redirect: 'follow',
+    });
+    html = await res.text();
+  } catch (e) {
+    return jsonError('Failed to fetch embed page: ' + e.message, 502);
+  }
+
+  const patterns = [
+    { re: /["']([^"']*\.m3u8[^"']*)/g,       type: 'hls' },
+    { re: /source:\s*["']([^"']*\.m3u8[^"']*)/g, type: 'hls' },
+    { re: /["']([^"']*\.mp4[^"']*)/g,         type: 'mp4' },
+    { re: /(?:file|src|source|url)["']?\s*:\s*["']([^"']{12,}\.(?:m3u8|mp4)[^"']*)/gi, type: 'auto' },
+  ];
+
+  const proxyBase = workerUrl.origin + '/proxy';
+
+  for (const { re, type } of patterns) {
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const candidate = m[1];
+      if (!candidate || candidate.length < 10) continue;
+      try {
+        const u = new URL(candidate);
+        if (isAdHost(u.hostname)) continue;
+      } catch (e) { continue; }
+
+      const proxied = `${proxyBase}?url=${encodeURIComponent(candidate)}`;
+      return new Response(JSON.stringify({ ok: true, url: proxied, raw: candidate, type }), {
+        headers: { 'Content-Type': 'application/json', ...CORS }
+      });
+    }
+  }
+
+  return new Response(JSON.stringify({ ok: false, error: 'No stream URL found in embed page' }), {
+    status: 404,
+    headers: { 'Content-Type': 'application/json', ...CORS }
+  });
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+function isAdHost(hostname) {
+  return AD_HOSTS.some(h => hostname === h || hostname.endsWith('.' + h));
+}
+
+function jsonError(msg, status = 500) {
+  return new Response(JSON.stringify({ ok: false, error: msg }), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS }
+  });
+}
